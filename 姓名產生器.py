@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-姓名產生器 - 含 TTS 支援（pyttsx3 優先，否則使用系統 TTS）
-- 在主界面新增「發音 (t)」按鈕，可朗讀當前顯示名字
-- 在預覽視窗新增「發音」按鈕，可朗讀選取候選名字
-- 非阻塞：TTS 在背景執行（thread）
-"""
+
 import random
 import json
 import os
