@@ -651,7 +651,7 @@ class NameGeneratorApp:
     def __init__(self, master):
         self.master = master
         master.title(f"名字抽取器 | 總組合數: {POOL_SIZE:,}")
-        master.geometry("780x520")
+        master.geometry("800x600")
         master.config(bg='#F0F0F0')
 
         self.name_var = tk.StringVar(master, value="準備就緒，請點擊抽取")
