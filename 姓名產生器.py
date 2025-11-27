@@ -6,7 +6,7 @@ import os
 import sys
 from datetime import datetime
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, simpledialog
+from tkinter import messagebox, scrolledtext, simpledialog, filedialog
 import shutil
 import time
 import re
@@ -647,7 +647,7 @@ class NameGeneratorApp:
         self.master = master
         master.title(f"名字抽取器 | 總組合數: {POOL_SIZE:,}")
         # 設為預設較大的視窗（若需改回其他尺寸請修改此行）
-        master.geometry("900x750")
+        master.geometry("900x500")
         master.config(bg='#F0F0F0')
 
         self.name_var = tk.StringVar(master, value="準備就緒，請點擊抽取")
@@ -710,16 +710,27 @@ class NameGeneratorApp:
         self.name_display.pack(pady=(12,6), padx=12)
 
         # 拼音與發音按鈕在同一列
+        # A) 推薦：grid 三欄法（左右權重相同，中央 label 固定在中間）
+        # ---------------------------
         pinyin_frame = tk.Frame(self.master, bg=main_bg)
-        pinyin_frame.pack(pady=(0,6), padx=12, fill='x')
+        pinyin_frame.pack(pady=(0, 6), padx=12, fill='x')
+
+        # 設定 3 欄：左右欄 weight=1，中央欄 weight=0（中央固定，左右作為彈性填充）
+        pinyin_frame.grid_columnconfigure(0, weight=1)
+        pinyin_frame.grid_columnconfigure(1, weight=0)
+        pinyin_frame.grid_columnconfigure(2, weight=1)
+
         self.pinyin_display = tk.Label(pinyin_frame,
-                                       textvariable=self.pinyin_var,
-                                       font=('Microsoft JhengHei', 12, 'italic'),
-                                       fg='gray', bg=main_bg)
-        self.pinyin_display.pack(side=tk.LEFT)
+                                    textvariable=self.pinyin_var,
+                                    font=('Microsoft JhengHei', 12, 'italic'),
+                                    fg='gray', bg=main_bg)
+        # 中央欄（col=1），不使用 expand/fill，會保持在 frame 正中央
+        self.pinyin_display.grid(row=0, column=1, padx=6)
+
+        # 把發音按鈕放在最右欄（col=2），靠右顯示
         self.speak_button = tk.Button(pinyin_frame, text="發音 (t)", command=self.speak_current_name,
-                                      font=('Microsoft JhengHei', 10), bg="#9C27B0", fg='white', width=12)
-        self.speak_button.pack(side=tk.LEFT, padx=(8,0))
+                                    font=('Microsoft JhengHei', 10), bg="#9C27B0", fg='white', width=12)
+        self.speak_button.grid(row=0, column=2, sticky='e', padx=(8,0))
 
         # 進度與主要抽取按鈕
         self.progress_label = tk.Label(self.master, textvariable=self.progress_var,
@@ -967,7 +978,291 @@ class NameGeneratorApp:
         self._update_progress_display(name="連續過濾失敗", remaining=remaining)
         messagebox.showwarning("抽取失敗", f"連續 {MAX_ATTEMPTS} 次抽取都遇到過濾情形，請重置或調整過濾規則。")
         self.draw_button.config(state=tk.DISABLED)
+    
+    def display_info_gui(self):
+        """
+        顯示系統資訊視窗（字詞庫、進度、檔案狀態、TTS 狀態等）。
+        將此方法貼到 NameGeneratorApp 類中（與其它 view_* 函式並列）。
+        依賴外部全域變數/函式： WORDS_FILE, WORD_COUNT, POOL_SIZE, db_get_remaining, STATUS_FILE, DB_FILE, CHAR_ATTR_FILE
+        """
+        try:
+            remaining_count = self._get_remaining_count()
+        except Exception:
+            try:
+                remaining_count = len(db_get_remaining())
+            except Exception:
+                remaining_count = "N/A"
 
+        drawn_count = "N/A"
+        try:
+            if isinstance(POOL_SIZE, int) and isinstance(remaining_count, int):
+                drawn_count = POOL_SIZE - remaining_count
+            else:
+                drawn_count = "N/A"
+        except Exception:
+            drawn_count = "N/A"
+
+        last_reset = "N/A"
+        try:
+            if os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE, 'r', encoding='utf-8') as sf:
+                    status_data = json.load(sf)
+                    last_reset = status_data.get("last_reset", last_reset)
+        except Exception:
+            pass
+
+        db_exists = os.path.exists(DB_FILE)
+        char_attr_exists = os.path.exists(CHAR_ATTR_FILE)
+        words_exists = os.path.exists(WORDS_FILE)
+
+        # TTS status (best-effort)
+        tts_status = "未知"
+        try:
+            import pyttsx3
+            tts_status = "pyttsx3 可用"
+        except Exception:
+            # fall back to check if speak_text is present
+            if 'speak_text' in globals():
+                tts_status = "TTS 函式可用"
+            else:
+                tts_status = "TTS 未安裝或不可用"
+
+        info_lines = []
+        info_lines.append("[一、字詞庫資訊]")
+        info_lines.append(f"  - 字詞庫檔案: {WORDS_FILE} ({'存在' if words_exists else '遺失'})")
+        info_lines.append(f"  - 總字數 (N): {WORD_COUNT:,}" if isinstance(WORD_COUNT, int) else f"  - 總字數 (N): {WORD_COUNT}")
+        info_lines.append(f"  - 總組合數 (N x N): {POOL_SIZE:,}" if isinstance(POOL_SIZE, int) else f"  - 總組合數 (N x N): {POOL_SIZE}")
+
+        info_lines.append("\n[二、抽取進度]")
+        info_lines.append(f"  - 已抽取: {drawn_count if isinstance(drawn_count, int) else drawn_count}")
+        info_lines.append(f"  - 剩餘數量: {remaining_count if isinstance(remaining_count, int) else remaining_count}")
+
+        info_lines.append("\n[三、檔案狀態]")
+        info_lines.append(f"  - DB: {'✅ 存在' if db_exists else '❌ 遺失'} ({DB_FILE})")
+        info_lines.append(f"  - 字屬性檔: {'✅ 存在' if char_attr_exists else '❌ 遺失'} ({CHAR_ATTR_FILE})")
+        info_lines.append(f"  - 上次重置時間: {last_reset}")
+
+        info_lines.append("\n[四、系統環境 & TTS]")
+        try:
+            py_ver = sys.version.splitlines()[0]
+        except Exception:
+            py_ver = sys.version if 'sys' in globals() else "unknown"
+        info_lines.append(f"  - Python: {py_ver}")
+        info_lines.append(f"  - 平台: {platform.system()} {platform.release()}")
+        info_lines.append(f"  - TTS: {tts_status}")
+
+        # 顯示視窗
+        info = "\n".join(info_lines)
+        try:
+            messagebox.showinfo("系統狀態與資訊 (INFO)", info)
+        except Exception:
+            # fallback: open a simple Toplevel with scrolledtext
+            w = tk.Toplevel(self.master)
+            w.title("系統狀態與資訊 (INFO)")
+            txt = scrolledtext.ScrolledText(w, wrap=tk.WORD, width=80, height=24)
+            txt.pack(expand=True, fill='both', padx=10, pady=10)
+            txt.insert(tk.END, info)
+            txt.config(state=tk.DISABLED)
+            tk.Button(w, text="關閉", command=w.destroy).pack(pady=(0,10))
+    
+    def display_frequency_stats_gui(self):
+        """
+        顯示字詞被抽取次數統計視窗（從 get_word_frequency_stats() 取得資料）。
+        將此方法貼到 NameGeneratorApp 類中（與其它 view_* 方法並列）。
+        支援匯出為 CSV 檔案。
+        """
+        try:
+            stats = get_word_frequency_stats()
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法計算字詞頻率: {e}")
+            return
+
+        if not stats or all(count == 0 for count in stats.values()):
+            messagebox.showinfo("字詞抽取頻率", "尚未抽取任何名字，或歷史記錄中沒有與當前字詞庫匹配的字。")
+            return
+
+        sorted_stats = sorted(stats.items(), key=lambda item: item[1], reverse=True)
+        total_draws = sum(stats.values()) // 2  # 每個名字有兩個字，所以這樣估算抽取名字數
+        header = f"【字詞抽取頻率統計】\n\n總抽取名字數 (估算): {total_draws:,} 個（雙字計算）\n\n"
+
+        # 建立視窗
+        w = tk.Toplevel(self.master)
+        w.title("字詞抽取頻率統計")
+        w.geometry("420x560")
+        w.transient(self.master)
+        w.grab_set()
+
+        # 文本區
+        text_widget = scrolledtext.ScrolledText(w, wrap=tk.WORD, font=('Courier New', 10))
+        text_widget.pack(expand=True, fill=tk.BOTH, padx=10, pady=(10,6))
+
+        # 組裝顯示內容（只列出有次數的字）
+        lines = [header]
+        for word, count in sorted_stats:
+            if count > 0:
+                lines.append(f"  - 字 '{word}': 被抽取 {count} 次")
+        content = "\n".join(lines)
+        text_widget.insert(tk.END, content)
+        text_widget.config(state=tk.DISABLED)
+
+        # 按鈕列（匯出 CSV / 關閉）
+        def export_csv():
+            try:
+                fn = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                filetypes=[("CSV files", "*.csv"), ("Text files", "*.txt")],
+                                                initialfile=f"frequency_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                                title="匯出字詞頻率為 CSV")
+                if not fn:
+                    return
+                import csv
+                with open(fn, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Word", "Count"])
+                    for word, count in sorted_stats:
+                        if count > 0:
+                            writer.writerow([word, count])
+                messagebox.showinfo("匯出成功", f"字詞頻率已匯出至:\n{fn}")
+            except Exception as e:
+                messagebox.showerror("匯出失敗", f"匯出過程發生錯誤: {e}")
+
+        btn_frame = tk.Frame(w)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0,10))
+        tk.Button(btn_frame, text="匯出 CSV", command=export_csv, bg="#2196F3", fg="white").pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="關閉", command=w.destroy).pack(side=tk.RIGHT, padx=6)
+
+        # 自動滾到頂部
+        try:
+            text_widget.see("1.0")
+        except Exception:
+            pass
+
+    def search_name_gui(self):
+        """
+        查詢兩字名字的狀態並顯示相關資訊。
+        將此方法貼到 NameGeneratorApp 類中（與其他 view_* 方法並列）。
+        會檢查：
+        - 名字是否為兩個字
+        - 是否在字詞庫中（每個字是否存在 MASTER_WORDS）
+        - 是否已被抽取（透過 history）
+        - 若啟用 pypinyin，會顯示拼音與聲調
+        """
+        name = simpledialog.askstring("名字查詢", "請輸入要查詢的兩個漢字名字:")
+        if not name:
+            return
+        name = name.strip()
+        if len(name) != 2:
+            messagebox.showwarning("查詢失敗", "名字必須為兩個漢字。")
+            return
+
+        a, b = name[0], name[1]
+        in_pool = (a in MASTER_WORDS) and (b in MASTER_WORDS)
+        idx = name_to_index(name) if in_pool else None
+
+        # 檢查抽取狀態（從 history）
+        drawn_status = "❌ 待抽取"
+        try:
+            rows = db_get_history()
+            for ts, n, tones in rows:
+                if n == name:
+                    drawn_status = "✅ 已抽取"
+                    break
+        except Exception:
+            # 若讀取失敗，設為未知
+            drawn_status = "未知（歷史讀取失敗）"
+
+        # 拼音/聲調資訊（若可用）
+        pinyin_display = ""
+        tones_display = ""
+        if PINYIN_ENABLED:
+            try:
+                pinyin_display, tones = get_pinyin_with_tone(name)
+                tones_display = f" 聲調: {tones}"
+            except Exception:
+                pinyin_display = ""
+                tones_display = ""
+
+        # 組出訊息
+        title = f"名字查詢：{name}"
+        msg_lines = []
+        msg_lines.append(f"名字：{name}")
+        msg_lines.append(f"是否在字詞庫中：{'✅ 是' if in_pool else '❌ 否'}")
+        if in_pool and idx is not None:
+            try:
+                msg_lines.append(f"索引 (a_index * N + b_index)：{idx}")
+                msg_lines.append(f"總字數: {WORD_COUNT:,}，總組合: {POOL_SIZE:,}")
+            except Exception:
+                pass
+        msg_lines.append(f"抽取狀態：{drawn_status}")
+        if pinyin_display:
+            msg_lines.append(f"拼音：{pinyin_display}{tones_display}")
+
+        # 顯示結果
+        messagebox.showinfo(title, "\n".join(msg_lines))
+    
+    def export_history_gui(self):
+        """
+        匯出歷史紀錄到文字或 CSV 檔案。
+        建議將此方法貼到 NameGeneratorApp 類中（與其它 view_* 函式平行）。
+        會使用 db_get_history() 取得 (timestamp, name, tones) 三元組。
+        """
+        try:
+            rows = db_get_history()
+        except Exception as e:
+            messagebox.showerror("匯出失敗", f"讀取歷史資料時發生錯誤：{e}")
+            return
+
+        if not rows:
+            messagebox.showwarning("匯出失敗", "歷史記錄為空，無法匯出。")
+            return
+
+        # 提供兩種格式：.txt 或 .csv
+        initial = f"Export_History_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        fn = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files","*.txt"), ("CSV files","*.csv")],
+            initialfile=initial + ".txt",
+            title="匯出歷史記錄為..."
+        )
+        if not fn:
+            return
+
+        try:
+            lower = fn.lower()
+            if lower.endswith(".csv"):
+                # 匯出 CSV：欄位 Timestamp, Name, Tones (tones 做為 JSON 或逗號分隔)
+                import csv
+                with open(fn, "w", encoding="utf-8", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Timestamp", "Name", "Tones"])
+                    for ts, name, tones in rows:
+                        tcell = ""
+                        if tones:
+                            # tones 在 DB 中可能是 JSON 字串，嘗試解析
+                            try:
+                                parsed = json.loads(tones)
+                                if isinstance(parsed, (list, tuple)):
+                                    tcell = ",".join(str(x) for x in parsed)
+                                else:
+                                    tcell = str(parsed)
+                            except Exception:
+                                tcell = str(tones)
+                        writer.writerow([ts, name, tcell])
+            else:
+                # 預設匯出為純文字，每行一筆
+                with open(fn, "w", encoding="utf-8") as f:
+                    for ts, name, tones in rows:
+                        line = f"[{ts}] - {name}"
+                        if tones:
+                            try:
+                                tlist = json.loads(tones)
+                                line += " [" + ",".join(map(str, tlist)) + "]"
+                            except Exception:
+                                line += f" [{tones}]"
+                        f.write(line + "\n")
+            messagebox.showinfo("匯出成功", f"歷史記錄已成功匯出至:\n{fn}")
+        except Exception as e:
+            messagebox.showerror("匯出失敗", f"匯出過程發生錯誤: {e}")
+        
     # 以下方法大致維持原先實作（保留行為）
     def undo_last_draw_gui(self):
         last = db_pop_last_history()
@@ -1085,6 +1380,148 @@ class NameGeneratorApp:
                 messagebox.showerror("錯誤", f"無法寫入收藏: {e}")
         else:
             messagebox.showwarning("提示","請先抽取一個名字再進行收藏。")
+    
+    def view_favorites_gui(self):
+        """
+        顯示收藏清單的視窗（含播放、複製、刪除與匯出功能）。
+        會使用資料庫中的 favorites 表（fetch id,timestamp,name）來展示並允許刪除單筆。
+        將這個方法貼到你的 NameGeneratorApp 類中（與其他 view_* 函式平行）。
+        """
+        try:
+            # 取得帶 id 的 favorites 資料
+            with db_connect() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT id, timestamp, name FROM favorites ORDER BY id ASC;")
+                rows = cur.fetchall()
+        except Exception as e:
+            messagebox.showerror("錯誤", f"無法讀取收藏資料庫：{e}")
+            return
+
+        w = tk.Toplevel(self.master)
+        w.title("收藏名字清單")
+        w.geometry("520x520")
+        w.transient(self.master)
+        w.grab_set()
+
+        # listbox 與 scrollbar
+        list_frame = tk.Frame(w)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL)
+        listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=('Courier New', 10))
+        scrollbar.config(command=listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        listbox.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+
+        # 將 rows（id,ts,name）存到本地變數以便操作
+        fav_rows = list(rows or [])
+
+        def refresh_list():
+            nonlocal fav_rows
+            try:
+                with db_connect() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT id, timestamp, name FROM favorites ORDER BY id ASC;")
+                    fav_rows = cur.fetchall()
+            except Exception as e:
+                messagebox.showerror("錯誤", f"無法讀取收藏資料庫：{e}")
+                fav_rows = []
+            listbox.delete(0, tk.END)
+            for i, (fid, ts, name) in enumerate(fav_rows, start=1):
+                display = f"{i:03d}. [{ts}] - {name}"
+                listbox.insert(tk.END, display)
+
+        refresh_list()
+
+        # 按鈕功能
+        def play_selected():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("請選擇", "請先從列表中選擇一個收藏項目。")
+                return
+            idx = sel[0]
+            _, ts, name = fav_rows[idx]
+            try:
+                speak_text(name)
+            except Exception:
+                messagebox.showwarning("發音失敗", "發音模組不可用或發生錯誤。")
+
+        def copy_selected():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("請選擇", "請先從列表中選擇一個收藏項目。")
+                return
+            idx = sel[0]
+            _, ts, name = fav_rows[idx]
+            try:
+                w.clipboard_clear()
+                w.clipboard_append(name)
+                messagebox.showinfo("複製成功", f"已複製：{name}")
+            except Exception as e:
+                messagebox.showerror("複製失敗", f"複製到剪貼簿時發生錯誤：{e}")
+
+        def delete_selected():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("請選擇", "請先從列表中選擇一個收藏項目。")
+                return
+            idx = sel[0]
+            fid, ts, name = fav_rows[idx]
+            if not messagebox.askyesno("確認刪除", f"確定要刪除收藏：\n[{ts}] - {name}？"):
+                return
+            try:
+                with db_connect() as conn:
+                    cur = conn.cursor()
+                    # 使用 id 刪除最安全
+                    cur.execute("DELETE FROM favorites WHERE id = ?;", (fid,))
+                refresh_list()
+                messagebox.showinfo("刪除成功", "已刪除選定的收藏。")
+                # 若在主畫面顯示收藏數量或其他資訊，可在此更新
+            except Exception as e:
+                messagebox.showerror("刪除失敗", f"刪除收藏時發生錯誤：{e}")
+
+        def export_all():
+            try:
+                if not fav_rows:
+                    messagebox.showinfo("匯出", "收藏列表為空，無資料可匯出。")
+                    return
+                fn = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")], initialfile=f"favorites_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+                if not fn:
+                    return
+                with open(fn, 'w', encoding='utf-8') as f:
+                    for fid, ts, name in fav_rows:
+                        f.write(f"[{ts}] - {name}\n")
+                messagebox.showinfo("匯出成功", f"已匯出至：{fn}")
+            except Exception as e:
+                messagebox.showerror("匯出失敗", f"匯出過程發生錯誤：{e}")
+
+        # 按鈕列
+        btn_frame = tk.Frame(w)
+        btn_frame.pack(fill=tk.X, padx=10, pady=(0,10))
+        tk.Button(btn_frame, text="發音選取", command=play_selected, bg="#9C27B0", fg="white").pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="複製選取", command=copy_selected, bg="#2196F3", fg="white").pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="刪除選取", command=delete_selected, bg="#D32F2F", fg="white").pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="匯出全部", command=export_all).pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="關閉", command=w.destroy).pack(side=tk.RIGHT, padx=6)
+
+        # 欄位鍵綁定（Enter 播放、Delete 刪除）
+        def on_key(event):
+            if event.keysym in ("Return", "KP_Enter"):
+                play_selected()
+            elif event.keysym == "Delete":
+                delete_selected()
+
+        listbox.bind("<Double-Button-1>", lambda e: play_selected())
+        listbox.bind("<Key>", on_key)
+
+        # 讓清單自動選到第一項（若存在）
+        if fav_rows:
+            try:
+                listbox.selection_set(0)
+                listbox.see(0)
+            except Exception:
+                pass
+    
+    
 
     def view_history_gui(self):
         rows = db_get_history()
