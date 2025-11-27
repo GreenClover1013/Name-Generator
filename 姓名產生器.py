@@ -20,6 +20,7 @@ import threading
 import subprocess
 import platform
 from tts import speak_text, stop_worker
+from additions import TTSSettingsDialog, CharAttributesEditor, register_shortcuts, load_tts_config, save_tts_config
 
 # --- pypinyin 可選 ---
 try:
@@ -727,6 +728,8 @@ class NameGeneratorApp:
         self.preview_button = tk.Button(button_frame_middle, text="預覽候選 (p)", command=self.open_preview_dialog, font=('Microsoft JhengHei', 10), width=12, bg="#FFCC80"); self.preview_button.pack(side=tk.LEFT, padx=5)
         self.search_button = tk.Button(button_frame_middle, text="查詢名字 (s)", command=self.search_name_gui, font=('Microsoft JhengHei', 10), width=12); self.search_button.pack(side=tk.LEFT, padx=5)
         self.frequency_button = tk.Button(button_frame_middle, text="字詞頻率 (w)", command=self.display_frequency_stats_gui, font=('Microsoft JhengHei', 10), width=12, bg="#B3E5FC"); self.frequency_button.pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame_middle, text="TTS 設定", command=lambda: TTSSettingsDialog(self.master, on_save=lambda cfg: None), font=('Microsoft JhengHei', 10), width=12).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame_middle, text="字屬性編輯", command=lambda: CharAttributesEditor(self.master, CHAR_ATTR_FILE, on_save=lambda attrs: load_char_attributes()), font=('Microsoft JhengHei', 10), width=12).pack(side=tk.LEFT, padx=5)
 
         button_frame_last = tk.Frame(self.master, bg=main_bg); button_frame_last.pack(pady=5)
         self.exclude_button = tk.Button(button_frame_last, text="排除此組合 (x)", command=self.exclude_current_name_gui, font=('Microsoft JhengHei', 10), width=12, bg="#FFCDD2"); self.exclude_button.pack(side=tk.LEFT, padx=10)
@@ -765,6 +768,12 @@ class NameGeneratorApp:
 
         self._setup_ui()
         self._update_progress_display()
+        
+        try:
+            register_shortcuts(self.master, self)
+        except Exception:
+            # 若註冊失敗不致命，僅印出警告或忽略
+            print("Warning: register_shortcuts failed (continuing)")
 
     def on_closing(self):
         save_indices_cache()
@@ -862,8 +871,14 @@ class NameGeneratorApp:
 
     def draw_name(self):
         """
-        抽取名字並立即以 TTS 發音（中斷先前播放，優先播放本次）。
-        請確認 get_unique_name 與其他函數在檔案中已正確定義。
+        抽取名字並根據 TTS 設定決定是否發音／中斷／節流（throttle）／延遲（debounce）。
+        依賴函式/變數：
+        - get_unique_name()
+        - PINYIN_ENABLED, get_pinyin_with_tone
+        - speak_text(...)（由 tts.py 提供，並支援 interrupt 參數）
+        - load_tts_config()
+        - self.master.after / after_cancel（用於 debounce）
+        - self._update_progress_display(...)
         """
         MAX_ATTEMPTS = min(POOL_SIZE if POOL_SIZE else 1000, 1000)
         for attempt in range(MAX_ATTEMPTS):
@@ -882,14 +897,124 @@ class NameGeneratorApp:
             except Exception:
                 pass
 
-            # 使用可中斷模式：中斷目前發音並立即播放本次名字
+            # ---------------------------
+            # TTS 控制：依設定決定是否發音，以及發音行為
+            # ---------------------------
             try:
-                speak_text(name, interrupt=True)
+                cfg = load_tts_config()  # 從 DB 讀取 tts_config（若無則回傳預設）
             except Exception:
-                # 若 TTS 不可用或出錯，容錯忽略
-                pass
+                cfg = None
 
-            # 若有拼音，顯示拼音（可選）
+            # 取得當前時間（毫秒）
+            now_ms = int(time.time() * 1000)
+            last_ms = getattr(self, "_last_speak_ts", 0)
+            throttle_ms = None
+            mode = None
+            rate = 160
+            volume = 1.0
+            enabled = True
+            interrupt_pref = True
+
+            if cfg:
+                enabled = bool(cfg.get("enabled", True))
+                interrupt_pref = bool(cfg.get("interrupt", True))
+                try:
+                    throttle_ms = int(cfg.get("throttle_ms", 300))
+                except Exception:
+                    throttle_ms = 300
+                mode = str(cfg.get("throttle_mode", "interrupt"))
+                try:
+                    rate = int(cfg.get("rate", 160))
+                except Exception:
+                    rate = 160
+                try:
+                    volume = float(cfg.get("volume", 1.0))
+                except Exception:
+                    volume = 1.0
+            else:
+                # fallback default
+                enabled = True
+                interrupt_pref = True
+                throttle_ms = 300
+                mode = "interrupt"
+                rate = 160
+                volume = 1.0
+
+            # speak decision
+            if enabled:
+                elapsed = now_ms - last_ms
+                # 若超過冷卻時間 (or last_speak_ts 未設定)
+                if elapsed >= throttle_ms:
+                    # 直接播放（可選中斷）
+                    do_interrupt = interrupt_pref or (mode == "interrupt")
+                    try:
+                        speak_text(name, rate=rate, volume=volume, interrupt=do_interrupt)
+                    except Exception:
+                        pass
+                    self._last_speak_ts = int(time.time() * 1000)
+                else:
+                    # 在 cooldown 期間，根據 mode 處理
+                    if mode == "interrupt":
+                        # 立刻中斷當前播放並播放最新
+                        try:
+                            speak_text(name, rate=rate, volume=volume, interrupt=True)
+                        except Exception:
+                            pass
+                        self._last_speak_ts = int(time.time() * 1000)
+                    elif mode == "skip":
+                        # 跳過此次發音（不做任何事）
+                        pass
+                    elif mode == "debounce":
+                        # 延遲播放：取消先前的 scheduled 呼叫，改為在 throttle_ms 後播放最新名字
+                        try:
+                            # 取消先前計時器（若存在）
+                            if hasattr(self, "_debounce_after_id") and self._debounce_after_id:
+                                try:
+                                    self.master.after_cancel(self._debounce_after_id)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # 存最新名字供延後播放使用
+                        self._debounce_pending_name = name
+
+                        def _debounced_play():
+                            pending = getattr(self, "_debounce_pending_name", None)
+                            if pending:
+                                try:
+                                    # 使用 interrupt 設定來播放
+                                    speak_text(pending, rate=rate, volume=volume, interrupt=interrupt_pref)
+                                except Exception:
+                                    pass
+                                # 更新 last speak 時間
+                                self._last_speak_ts = int(time.time() * 1000)
+                            # 清除記錄
+                            self._debounce_after_id = None
+                            self._debounce_pending_name = None
+
+                        # schedule new debounced play after throttle_ms (ms)
+                        try:
+                            self._debounce_after_id = self.master.after(throttle_ms, _debounced_play)
+                        except Exception:
+                            # 若 after 發生錯誤，直接發音作為 fallback
+                            try:
+                                speak_text(name, rate=rate, volume=volume, interrupt=interrupt_pref)
+                                self._last_speak_ts = int(time.time() * 1000)
+                            except Exception:
+                                pass
+                    else:
+                        # 未知 mode，預設行為：中斷並播放最新
+                        try:
+                            speak_text(name, rate=rate, volume=volume, interrupt=True)
+                        except Exception:
+                            pass
+                        self._last_speak_ts = int(time.time() * 1000)
+            # 如果禁用 TTS，就跳過發音
+
+            # ---------------------------
+            # 顯示拼音與更新 GUI（不影響 TTS 行為）
+            # ---------------------------
             pinyin_str = ""
             if PINYIN_ENABLED:
                 try:
@@ -897,17 +1022,17 @@ class NameGeneratorApp:
                 except Exception:
                     pinyin_str = ""
 
-            # 更新 GUI 顯示（名字、進度、拼音）
             self._update_progress_display(name, remaining, pinyin_str)
             return
 
-        # 若連續嘗試都失敗
+        # 若嘗試耗盡仍未找到
         self.current_name = ""
         self.pinyin_var.set("")
         remaining = self._get_remaining_count()
         self._update_progress_display(name="連續過濾失敗", remaining=remaining)
         messagebox.showwarning("抽取失敗", f"連續 {MAX_ATTEMPTS} 次抽取都遇到過濾情形，請重置或調整過濾規則。")
         self.draw_button.config(state=tk.DISABLED)
+    # End of draw_name
 
     def undo_last_draw_gui(self):
         last = db_pop_last_history()
