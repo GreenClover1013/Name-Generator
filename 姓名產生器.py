@@ -16,7 +16,7 @@ import subprocess
 import platform
 from tts import speak_text, stop_worker
 from additions import TTSSettingsDialog, CharAttributesEditor, register_shortcuts, load_tts_config, save_tts_config
-from zhuyin_ui import ZhuyinSettingsDialog, load_zhuyin_config, get_zhuyin
+from zhuyin_ui import ZhuyinSettingsDialog, load_zhuyin_config, get_zhuyin, save_zhuyin_config
 
 # --- pypinyin 可選 ---
 try:
@@ -659,6 +659,12 @@ class NameGeneratorApp:
 
         # 確保在建立視窗之後註冊關閉處理
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        try:
+            self._zhuyin_cfg = load_zhuyin_config()
+        except Exception:
+            self._zhuyin_cfg = {"enabled": False, "sample_fontsize": 12}
+        print("[DEBUG] zhuyin_cfg loaded:", getattr(self, "_zhuyin_cfg", None))
 
         # 建立 UI 與載入畫面
         self._setup_ui()
@@ -745,10 +751,19 @@ class NameGeneratorApp:
                                     fg='gray', bg=main_bg)
         self.pinyin_display.grid(row=1, column=0, sticky='n', pady=(0,2))
 
-        # speak button 右側，跨兩列以對齊 name + pinyin
+        # 右側：發音按鈕（row=0）
         self.speak_button = tk.Button(np_frame, text="發音 (t)", command=self.speak_current_name,
                                     font=('Microsoft JhengHei', 10), bg="#9C27B0", fg='white', width=12)
-        self.speak_button.grid(row=0, column=1, rowspan=2, sticky='ne', padx=(8,0), pady=(0,2))
+        self.speak_button.grid(row=0, column=1, sticky='ne', padx=(8,0), pady=(0,2))
+
+        # 右側下方：注音開關（Checkbutton），會立即更新並儲存設定
+        # 使用 IntVar 或 BooleanVar 來綁定狀態
+        self._zhuyin_var = tk.BooleanVar(master=self.master, value=bool(getattr(self, "_zhuyin_cfg", {}).get("enabled", False)))
+        self._zhuyin_toggle = tk.Checkbutton(np_frame, text="注音", variable=self._zhuyin_var,
+                                            command=self._toggle_zhuyin,
+                                            font=('Microsoft JhengHei', 9),
+                                            bg=main_bg, onvalue=True, offvalue=False)
+        self._zhuyin_toggle.grid(row=1, column=1, sticky='ne', padx=(8,0), pady=(0,2))
 
         # --- 3. progress 與 draw button（較小的間距） ---
         self.progress_label = tk.Label(self.master, textvariable=self.progress_var,
@@ -876,6 +891,128 @@ class NameGeneratorApp:
             self.pinyin_var.set(pinyin_str)
         else:
             self.pinyin_var.set("")
+    
+    def _on_zhuyin_saved(self, cfg):
+        """
+        Called by ZhuyinSettingsDialog when user saves config.
+        更新記憶體快取、套用字型大小，並在需要時啟動非同步注音計算更新目前畫面。
+        """
+        try:
+            print("[DEBUG] _on_zhuyin_saved called:", cfg)
+            if not isinstance(cfg, dict):
+                return
+            self._zhuyin_cfg = cfg.copy()
+            # apply font size if possible
+            try:
+                size = int(cfg.get("sample_fontsize", 12))
+                self.pinyin_display.config(font=('Microsoft JhengHei', size, 'italic'))
+            except Exception:
+                pass
+
+            if cfg.get("enabled"):
+                # 若目前有名字，啟動 background 計算注音
+                if getattr(self, "current_name", None):
+                    threading.Thread(target=self._compute_and_set_zhuyin, args=(self.current_name,), daemon=True).start()
+            else:
+                # 關閉注音 -> 清空顯示（或你可以改為顯示拼音）
+                try:
+                    self.pinyin_var.set("")
+                except Exception:
+                    pass
+        except Exception as e:
+            print("ERROR in _on_zhuyin_saved:", e)
+    
+    def _toggle_zhuyin(self):
+        """
+        Called when the Checkbutton is toggled.
+        會更新快取 self._zhuyin_cfg, 儲存設定，並即時套用（若啟用會在 background 計算注音）。
+        """
+        try:
+            enabled = bool(self._zhuyin_var.get())
+            # update in-memory cfg
+            cur = getattr(self, "_zhuyin_cfg", {"enabled": False, "sample_fontsize": 12})
+            cur["enabled"] = enabled
+            self._zhuyin_cfg = cur
+            # persist
+            try:
+                save_zhuyin_config(self._zhuyin_cfg)
+            except Exception as e:
+                print("WARN: save_zhuyin_config failed:", e)
+            # apply immediately
+            if enabled and getattr(self, "current_name", None):
+                # 非阻塞計算注音並更新 UI
+                try:
+                    threading.Thread(target=self._compute_and_set_zhuyin, args=(self.current_name,), daemon=True).start()
+                except Exception:
+                    # fallback 同步
+                    try:
+                        z = get_zhuyin(self.current_name) or ""
+                    except Exception:
+                        z = ""
+                    self.pinyin_var.set(z)
+            else:
+                # disabled -> 清除欄位（或可切換為顯示拼音）
+                try:
+                    self.pinyin_var.set("")
+                except Exception:
+                    pass
+        except Exception as e:
+            print("ERROR in _toggle_zhuyin:", e)
+
+    def _save_zhuyin_cfg(self):
+        """
+        強制把目前快取寫入 DB（沒用到也可作為備援）。
+        """
+        try:
+            save_zhuyin_config(getattr(self, "_zhuyin_cfg", {"enabled": False, "sample_fontsize": 12}))
+        except Exception as e:
+            print("ERROR saving zhuyin cfg:", e)
+        def _compute_and_set_zhuyin(self, name):
+            """
+            在背景線程計算注音，完成後透過 master.after 更新 UI（僅在 current_name 未變時應用）。
+            """
+            try:
+                print("[DEBUG] compute zhuyin background for:", name)
+                z = ""
+                try:
+                    z = get_zhuyin(name) or ""
+                except Exception as e:
+                    print("zhuyin compute error:", e)
+                    z = ""
+                def _apply():
+                    try:
+                        if getattr(self, "current_name", None) == name:
+                            self.pinyin_var.set(z)
+                            print("[DEBUG] zhuyin applied:", z)
+                        else:
+                            print("[DEBUG] zhuyin ignored (name changed):", name)
+                    except Exception as e:
+                        print("Error applying zhuyin:", e)
+                self.master.after(0, _apply)
+            except Exception as e:
+                print("ERROR in _compute_and_set_zhuyin:", e)
+    
+    def test_zhuyin_now(self):
+        """
+        立刻同步計算目前 current_name 的注音並顯示（方便 debug）。
+        你可以把這個按鈕暫時放在 UI（例如 batch_frame）來測試 pypinyin 是否可用。
+        """
+        try:
+            name = getattr(self, "current_name", None) or self.name_var.get() or ""
+            if not name:
+                messagebox.showinfo("提示", "目前沒有名字可供測試（請先抽取一個）")
+                return
+            print("[DEBUG] test_zhuyin_now for:", name)
+            z = ""
+            try:
+                z = get_zhuyin(name) or ""
+            except Exception as e:
+                print("test get_zhuyin error:", e)
+                z = ""
+            self.pinyin_var.set(z)
+            print("[DEBUG] test_zhuyin_now result:", z)
+        except Exception as e:
+            print("ERROR in test_zhuyin_now:", e)
 
     # draw_name 保留你之前的完整實作（含 TTS throttle/interrutp/debounce）
     def draw_name(self):
@@ -981,15 +1118,40 @@ class NameGeneratorApp:
                             pass
                         self._last_speak_ts = int(time.time() * 1000)
 
-            # 顯示拼音與更新 GUI
             pinyin_str = ""
-            if PINYIN_ENABLED:
+
+            # 使用快取的設定（避免每次 DB 讀取）
+            zh_cfg = getattr(self, "_zhuyin_cfg", {"enabled": False, "sample_fontsize": 12})
+
+            # 若注音啟用：先把 name 更新到 UI，並在背景計算注音（非阻塞）
+            if zh_cfg.get("enabled", False):
+                # 先把 name 顯示出來，pinyin 先留空（或可顯示 loading）
+                self._update_progress_display(name, remaining, pinyin_str)
+                # 非阻塞計算注音並更新 pinyin_var（只在 current_name 相同時應用）
                 try:
-                    pinyin_str, _ = get_pinyin_with_tone(name)
+                    threading.Thread(target=self._compute_and_set_zhuyin, args=(name,), daemon=True).start()
                 except Exception:
+                    # 若 thread 建立失敗，退回同步計算（fallback）
+                    try:
+                        pinyin_str = get_zhuyin(name) or ""
+                    except Exception:
+                        pinyin_str = ""
+                    self._update_progress_display(name, remaining, pinyin_str)
+                # 一旦已經更新畫面（非阻塞或 fallback 同步），就應該結束此 draw_name 的工作，避免繼續迴圈抽取下一個。
+                return
+
+            else:
+                # 注音未啟用：若有 PINYIN 支援，可同步計算拼音（通常很快）
+                if PINYIN_ENABLED:
+                    try:
+                        pinyin_str, _ = get_pinyin_with_tone(name)
+                    except Exception:
+                        pinyin_str = ""
+                else:
                     pinyin_str = ""
-            self._update_progress_display(name, remaining, pinyin_str)
-            return
+                # 同步更新 UI（顯示拼音），然後結束此 draw 操作
+                self._update_progress_display(name, remaining, pinyin_str)
+                return
 
         # 若嘗試耗盡仍未找到
         self.current_name = ""
@@ -999,6 +1161,28 @@ class NameGeneratorApp:
         messagebox.showwarning("抽取失敗", f"連續 {MAX_ATTEMPTS} 次抽取都遇到過濾情形，請重置或調整過濾規則。")
         self.draw_button.config(state=tk.DISABLED)
     
+    def _on_zhuyin_saved(self, cfg):
+        """
+        ZhuyinSettingsDialog on_save callback.
+        cfg: dict from load_zhuyin_config e.g. {"enabled": True, "sample_fontsize":12}
+        這裡的作用：若當前已顯示名字，根據新設定立刻重新計算並更新 pinyin_var（注音顯示欄）。
+        """
+        try:
+            if cfg and cfg.get("enabled"):
+                # 若啟用注音，計算目前名字的注音並顯示
+                if getattr(self, "current_name", None):
+                    try:
+                        zh = get_zhuyin(self.current_name)
+                        self._update_progress_display(name=self.current_name, remaining=self._get_remaining_count(), pinyin_str=zh)
+                    except Exception:
+                        # 若計算失敗，清空注音欄位
+                        self.pinyin_var.set("")
+            else:
+                # 注音關閉：清除顯示或保留原本拼音（這裡選擇清除）
+                self.pinyin_var.set("")
+        except Exception:
+            pass
+        
     def display_info_gui(self):
         """
         顯示系統資訊視窗（字詞庫、進度、檔案狀態、TTS 狀態等）。
