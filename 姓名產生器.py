@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-姓名產生器 - 已加入：
-- 字詞屬性支援 (char_attributes.json / DB 可延伸)
-- 名字評分系統 (score_name)
-- 即時預覽候選 (PreviewCandidatesDialog)：可預覽、複製、並選擇使用某候選
-
-基礎版本以 SQLite 為狀態儲存，並保留簡單的檔案原子寫入工具。
+姓名產生器 - 含 TTS 支援（pyttsx3 優先，否則使用系統 TTS）
+- 在主界面新增「發音 (t)」按鈕，可朗讀當前顯示名字
+- 在預覽視窗新增「發音」按鈕，可朗讀選取候選名字
+- 非阻塞：TTS 在背景執行（thread）
 """
 import random
 import json
@@ -18,6 +16,10 @@ import shutil
 import time
 import re
 import sqlite3
+import threading
+import subprocess
+import platform
+from tts import speak_text, stop_worker
 
 # --- pypinyin 可選 ---
 try:
@@ -35,6 +37,15 @@ try:
         return display_pinyin, tuple(tones)
 except Exception:
     PINYIN_ENABLED = False
+
+# ----------------- pyttsx3 支援 -----------------
+
+def speak_current_name(self):
+    text = self.current_name or self.name_var.get() or ""
+    if not text or "請點擊抽取" in text or "已全部抽取完畢" in text:
+        messagebox.showwarning("無法發音", "目前沒有可發音的名字，請先抽取或選擇一個名字。")
+        return
+    speak_text(text)  # 呼叫 pyttsx3 的非阻塞發音
 
 # ----------------- 配置 -----------------
 WORDS_FILE = 'words_list.txt'
@@ -266,12 +277,11 @@ def save_char_attributes():
 # ----------------- 評分系統 -----------------
 def score_name(name):
     """
-    簡單評分範例：
-    - 加權分: char.weight (預設 1)
-    - 聲調加分/扣分: 若在 blacklist 扣大分；若聲調相同則小扣分；不同則小加分
-    - 筆劃平衡: 筆劃差越小越好 (bonus)
-    - 五行配對: 若五行互補 (簡化邏輯) 給小加分，若相同則小扣分
-    最終回傳 float（數值越大越好）
+    簡單評分範例（可擴充）：
+    - 權重（weight）
+    - 筆劃平衡
+    - 五行配對
+    - 聲調影響（若能取得）
     """
     base = 0.0
     a = name[0]; b = name[1]
@@ -284,7 +294,6 @@ def score_name(name):
     sb = CHAR_ATTRS.get(b, {}).get("strokes")
     if sa is not None and sb is not None:
         diff = abs(sa - sb)
-        # smaller difference -> higher bonus
         base += max(0, 3 - diff) * 0.6
 
     # wuxing
@@ -307,10 +316,8 @@ def score_name(name):
             if tuple(tones) in unsmooth:
                 base -= 5.0
             elif tuple(tones) in prob_list:
-                # expected penalty by average probability
                 base -= (chance / 100.0) * 2.0
             else:
-                # small bonus for differing tones
                 if len(tones) >=2 and tones[0] != tones[1]:
                     base += 1.2
                 else:
@@ -318,12 +325,11 @@ def score_name(name):
         except Exception:
             pass
 
-    # uniqueness / rarity: if weight < 1 then rare -> bonus
     base += max(0, 1.5 - ((wa + wb) / 2.0)) * 0.7
 
     return base
 
-# ----------------- 其他核心函式 (name/index) -----------------
+# ----------------- name/index 與核心邏輯 -----------------
 def name_to_index(name):
     if not name or len(name) < 2:
         return None
@@ -436,7 +442,6 @@ def get_unique_name():
                 prob_list = [tuple(x) for x in cfg.get("probabilistic_blacklist", [])]
                 chance = int(cfg.get("reject_chance", 50))
                 if tuple(tones) in unsmooth:
-                    # 移除 DB 索引並跳過
                     try:
                         db_delete_remaining_index(next_index)
                     except Exception:
@@ -452,7 +457,6 @@ def get_unique_name():
                         continue
             except Exception:
                 pass
-        # 接受：從 DB 刪除此索引（若尚存），並寫 history
         try:
             db_delete_remaining_index(next_index)
         except Exception:
@@ -483,10 +487,6 @@ def get_progress_bar(remaining):
 
 # ----------------- Preview Dialog (即時預覽) -----------------
 class PreviewCandidatesDialog(tk.Toplevel):
-    """
-    即時預覽：掃描部分 remaining indices、計算分數、顯示 top-N 候選。
-    使用者可選定某個候選並「使用」它（會將該索引從 remaining 中移除並寫入 history）。
-    """
     def __init__(self, master_app, sample_size=800, top_n=50):
         super().__init__(master_app.master)
         self.title("預覽高分候選名字")
@@ -503,14 +503,14 @@ class PreviewCandidatesDialog(tk.Toplevel):
         btn_frame = tk.Frame(self)
         btn_frame.pack(pady=6)
         tk.Button(btn_frame, text="刷新", command=self.refresh, bg="#03A9F4", fg="white").pack(side=tk.LEFT, padx=6)
+        tk.Button(btn_frame, text="發音", command=self.speak_selected, bg="#9C27B0", fg="white").pack(side=tk.LEFT, padx=6)
         tk.Button(btn_frame, text="使用選定名字", command=self.use_selected, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=6)
         tk.Button(btn_frame, text="關閉", command=self.destroy).pack(side=tk.LEFT, padx=6)
 
         self.listbox = tk.Listbox(self, height=12, font=('Courier New', 12))
         self.listbox.pack(expand=False, fill='x', padx=8, pady=(0,6))
 
-        # 初次刷新並顯示
-        self.candidates = []  # list of (score, name, index, tones_display)
+        self.candidates = []
         self.refresh()
 
     def refresh(self):
@@ -548,6 +548,15 @@ class PreviewCandidatesDialog(tk.Toplevel):
             self.text.insert(tk.END, line)
         self.text.config(state=tk.DISABLED)
 
+    def speak_selected(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            messagebox.showwarning("請選擇", "請先從列表中選擇一個名字")
+            return
+        idx = sel[0]
+        sc, name, index, tones = self.candidates[idx]
+        speak_text(name)
+
     def use_selected(self):
         sel = self.listbox.curselection()
         if not sel:
@@ -557,7 +566,6 @@ class PreviewCandidatesDialog(tk.Toplevel):
         sc, name, index, tones = self.candidates[idx]
         if not messagebox.askyesno("確認使用", f"您確定要使用名字 '{name}' 嗎？\n(此動作會將該組合從待抽取清單移除並記錄到歷史)"):
             return
-        # 從記憶體與 DB 移除 index
         try:
             if index in NAME_INDICES_CACHE:
                 try:
@@ -567,7 +575,6 @@ class PreviewCandidatesDialog(tk.Toplevel):
             db_delete_remaining_index(index)
         except Exception:
             pass
-        # 寫入 history
         try:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             db_insert_history(ts, name, json.dumps([]))
@@ -577,7 +584,7 @@ class PreviewCandidatesDialog(tk.Toplevel):
         self.master_app._update_progress_display(remaining=len(db_get_remaining()))
         self.refresh()
 
-# ----------------- Filter settings dialog (reuse) -----------------
+# ----------------- FilterSettingsDialog (unchanged) -----------------
 class FilterSettingsDialog(tk.Toplevel):
     def __init__(self, master):
         super().__init__(master)
@@ -638,7 +645,94 @@ class FilterSettingsDialog(tk.Toplevel):
         messagebox.showinfo("保存成功", "過濾設定已儲存。")
         self.destroy()
 
-# ----------------- GUI 主應用 -----------------
+# ----------------- GUI 主應用（加入發音按鈕） -----------------
+class NameGeneratorApp:
+    def __init__(self, master):
+        self.master = master
+        master.title(f"名字抽取器 | 總組合數: {POOL_SIZE:,}")
+        master.geometry("780x520")
+        master.config(bg='#F0F0F0')
+
+        self.name_var = tk.StringVar(master, value="準備就緒，請點擊抽取")
+        self.progress_var = tk.StringVar(master)
+        self.pinyin_var = tk.StringVar(master, value="")
+        self.config_stats_var = tk.StringVar(master, value="")
+        self.current_name = ""
+
+        self._setup_ui()
+        self._update_progress_display()
+
+    def on_closing(self):
+        # 嘗試優雅停止 TTS worker（避免程式直接退出時 worker 卡住）
+        try:
+            stop_worker()
+        except Exception:
+            pass
+        save_indices_cache()
+        save_char_attributes()
+        self.master.destroy()
+
+    def _setup_ui(self):
+        main_bg = '#F0F0F0'
+        name_fg = 'black'
+        self.name_display = tk.Entry(self.master, textvariable=self.name_var, font=('Microsoft JhengHei', 24, 'bold'), fg=name_fg, bg=main_bg, justify='center', state='readonly', readonlybackground=main_bg, relief='flat', width=15)
+        self.name_display.pack(pady=10, padx=10)
+        self.pinyin_display = tk.Label(self.master, textvariable=self.pinyin_var, font=('Microsoft JhengHei', 12, 'italic'), fg='gray', bg=main_bg, pady=0)
+        self.pinyin_display.pack(pady=(0,5))
+        # 發音按鈕放在名字下方（與拼音同列）
+        tts_frame = tk.Frame(self.master, bg=main_bg)
+        tts_frame.pack()
+        self.speak_button = tk.Button(tts_frame, text="發音 (t)", command=self.speak_current_name, font=('Microsoft JhengHei', 10), bg="#9C27B0", fg='white', width=12)
+        self.speak_button.pack(pady=(0,6))
+        self.progress_label = tk.Label(self.master, textvariable=self.progress_var, font=('Microsoft JhengHei', 10), bg=main_bg, pady=10)
+        self.progress_label.pack()
+        self.draw_button = tk.Button(self.master, text="抽取下一個名字 (Click)", command=self.draw_name, font=('Microsoft JhengHei', 14), bg="#4CAF50", fg='white', width=30, height=2)
+        self.draw_button.pack(pady=10)
+
+        batch_frame = tk.Frame(self.master, bg=main_bg); batch_frame.pack(pady=5)
+        tk.Label(batch_frame, text="批量數量:", bg=main_bg, font=('Microsoft JhengHei', 10)).pack(side=tk.LEFT, padx=(10,2))
+        self.batch_count_var = tk.StringVar(self.master, value='50')
+        self.batch_count_entry = tk.Entry(batch_frame, textvariable=self.batch_count_var, width=6, font=('Microsoft JhengHei', 10)); self.batch_count_entry.pack(side=tk.LEFT, padx=(0,10))
+        self.batch_draw_button = tk.Button(batch_frame, text="批量抽取並預覽", command=self.batch_draw_gui, font=('Microsoft JhengHei', 10), bg="#03A9F4", fg='white', width=18); self.batch_draw_button.pack(side=tk.LEFT, padx=5)
+
+        button_frame_top = tk.Frame(self.master, bg=main_bg); button_frame_top.pack(pady=5)
+        self.history_button = tk.Button(button_frame_top, text="檢視歷史 (l)", command=self.view_history_gui, font=('Microsoft JhengHei', 10), width=12); self.history_button.pack(side=tk.LEFT, padx=5)
+        self.view_favorite_button = tk.Button(button_frame_top, text="檢視收藏 (v)", command=self.view_favorites_gui, font=('Microsoft JhengHei', 10), width=12); self.view_favorite_button.pack(side=tk.LEFT, padx=5)
+        self.export_button = tk.Button(button_frame_top, text="匯出歷史 (e)", command=self.export_history_gui, font=('Microsoft JhengHei', 10), width=12); self.export_button.pack(side=tk.LEFT, padx=5)
+        self.info_button = tk.Button(button_frame_top, text="系統資訊 (i)", command=self.display_info_gui, font=('Microsoft JhengHei', 10), width=12); self.info_button.pack(side=tk.LEFT, padx=5)
+
+        button_frame_middle = tk.Frame(self.master, bg=main_bg); button_frame_middle.pack(pady=5)
+        self.reset_button = tk.Button(button_frame_middle, text="重置數據庫 (r)", command=self.reset_database, font=('Microsoft JhengHei', 10), width=12, bg="#D32F2F", fg="white"); self.reset_button.pack(side=tk.LEFT, padx=5)
+        self.excluded_button = tk.Button(button_frame_middle, text="檢視排除列表", command=self.view_excluded_names_gui, font=('Microsoft JhengHei', 10), width=12); self.excluded_button.pack(side=tk.LEFT, padx=5)
+        self.restore_button = tk.Button(button_frame_top, text="恢復排除組合", command=self.view_and_restore_excluded_gui, font=('Microsoft JhengHei', 10), width=12, bg="#CDDC39"); self.restore_button.pack(side=tk.LEFT, padx=5)
+        self.manage_button = tk.Button(button_frame_middle, text="字詞庫管理 (m)", command=self.manage_words_gui, font=('Arial', 10), width=12, bg="#FFE0B2"); self.manage_button.pack(side=tk.LEFT, padx=5)
+        self.filter_button = tk.Button(button_frame_middle, text="過濾設定 (g)", command=self.open_filter_settings, font=('Microsoft JhengHei', 10), width=12, bg="#B2DFDB"); self.filter_button.pack(side=tk.LEFT, padx=5)
+        self.preview_button = tk.Button(button_frame_middle, text="預覽候選 (p)", command=self.open_preview_dialog, font=('Microsoft JhengHei', 10), width=12, bg="#FFCC80"); self.preview_button.pack(side=tk.LEFT, padx=5)
+        self.search_button = tk.Button(button_frame_middle, text="查詢名字 (s)", command=self.search_name_gui, font=('Microsoft JhengHei', 10), width=12); self.search_button.pack(side=tk.LEFT, padx=5)
+        self.frequency_button = tk.Button(button_frame_middle, text="字詞頻率 (w)", command=self.display_frequency_stats_gui, font=('Microsoft JhengHei', 10), width=12, bg="#B3E5FC"); self.frequency_button.pack(side=tk.LEFT, padx=5)
+
+        button_frame_last = tk.Frame(self.master, bg=main_bg); button_frame_last.pack(pady=5)
+        self.exclude_button = tk.Button(button_frame_last, text="排除此組合 (x)", command=self.exclude_current_name_gui, font=('Microsoft JhengHei', 10), width=12, bg="#FFCDD2"); self.exclude_button.pack(side=tk.LEFT, padx=10)
+        self.favorite_button = tk.Button(button_frame_last, text="收藏名字 (f)", command=self.add_favorite_gui, font=('Microsoft JhengHei', 10), width=12); self.favorite_button.pack(side=tk.LEFT, padx=10)
+        self.undo_button = tk.Button(button_frame_last, text="撤銷抽取 (u)", command=self.undo_last_draw_gui, font=('Microsoft JhengHei', 10), width=12, bg="#D1C4E9"); self.undo_button.pack(side=tk.LEFT, padx=10)
+
+        button_frame_last2 = tk.Frame(self.master, bg=main_bg); button_frame_last2.pack(pady=5)
+        self.view_words_button = tk.Button(button_frame_last2, text="檢視字詞庫 (w)", command=self.view_word_list_gui, font=('Microsoft JhengHei', 10), width=15, bg="#C8E6C9"); self.view_words_button.pack(side=tk.LEFT, padx=5)
+
+    def speak_current_name(self):
+        # speak current_name if present, else speak what's in the display
+        text = self.current_name or self.name_var.get() or ""
+        if not text or "請點擊抽取" in text or "已全部抽取完畢" in text:
+            messagebox.showwarning("無法發音", "目前沒有可發音的名字，請先抽取或選擇一個名字。")
+            return
+        speak_text(text)
+
+    def open_filter_settings(self):
+        FilterSettingsDialog(self.master)
+
+    def open_preview_dialog(self):
+        PreviewCandidatesDialog(self)
+
 class NameGeneratorApp:
     def __init__(self, master):
         self.master = master
@@ -750,6 +844,7 @@ class NameGeneratorApp:
             self.pinyin_var.set("")
 
     def draw_name(self):
+        """點擊抽取按鈕時執行的函數（抽到即發音）。"""
         MAX_ATTEMPTS = min(POOL_SIZE if POOL_SIZE else 1000, 1000)
         for attempt in range(MAX_ATTEMPTS):
             name, remaining = get_unique_name()
@@ -758,20 +853,37 @@ class NameGeneratorApp:
                 self._update_progress_display(name, remaining)
                 messagebox.showinfo("提示", "所有名字已抽取完畢或無合適組合！")
                 return
+
+            # 設定目前名字並嘗試複製到剪貼簿
             self.current_name = name
             try:
-                self.master.clipboard_clear(); self.master.clipboard_append(name)
+                self.master.clipboard_clear()
+                self.master.clipboard_append(name)
             except Exception:
                 pass
+
+            # 發音（非阻塞）
+            try:
+                speak_text(name)
+            except Exception:
+                # 容錯：若 TTS 不可用則忽略
+                pass
+
+            # 若有拼音，顯示拼音
             pinyin_str = ""
             if PINYIN_ENABLED:
                 try:
                     pinyin_str, _ = get_pinyin_with_tone(name)
                 except Exception:
                     pinyin_str = ""
+
+            # 更新 GUI 顯示（名字、進度、拼音）
             self._update_progress_display(name, remaining, pinyin_str)
             return
-        self.current_name = ""; self.pinyin_var.set("")
+
+        # 嘗試耗盡仍未找到
+        self.current_name = ""
+        self.pinyin_var.set("")
         remaining = self._get_remaining_count()
         self._update_progress_display(name="連續過濾失敗", remaining=remaining)
         messagebox.showwarning("抽取失敗", f"連續 {MAX_ATTEMPTS} 次抽取都遇到過濾情形，請重置或調整過濾規則。")
@@ -1042,8 +1154,6 @@ class NameGeneratorApp:
         messagebox.showinfo("成功", f"字詞庫已更新。\n已使用 {WORD_COUNT} 個字重新生成 {POOL_SIZE:,} 個索引。")
         window.destroy()
 
-# ----------------- BatchWordManagerDialog / RestoreExcludedDialog reused (omitted here for brevity) ------------
-# For brevity, reuse the previous implementations from earlier file versions (they remain compatible).
 # ----------------- 啟動邏輯 -----------------
 def setup_data_paths():
     global WORDS_FILE, STATE_FILE, HISTORY_FILE, FAVORITES_FILE, STATUS_FILE, DATA_DIR, DB_FILE, CHAR_ATTR_FILE
@@ -1095,8 +1205,29 @@ class RestoreExcludedDialog(tk.Toplevel):
         for _id, ts, name in excluded_rows:
             self.listbox.insert(tk.END, f"[{ts}] - {name}  (id:{_id})")
         bf = tk.Frame(self); bf.pack(pady=6)
+
+        # 新增：發音按鈕（對選取的已排除名字發音）
+        tk.Button(bf, text="發音", command=self.speak_selected, bg="#9C27B0", fg="white").pack(side=tk.LEFT, padx=8)
+
         tk.Button(bf, text="恢復選定組合", command=self.restore_selected, bg="#4CAF50", fg="white").pack(side=tk.LEFT, padx=8)
         tk.Button(bf, text="關閉", command=self.destroy).pack(side=tk.LEFT, padx=8)
+
+    def speak_selected(self):
+        """對 Listbox 中選取的第一筆已排除名字進行發音（若有 tts 可用）。"""
+        try:
+            sel = self.listbox.curselection()
+            if not sel:
+                messagebox.showwarning("請選擇", "請先選擇一個已排除的名字以供發音。")
+                return
+            i = sel[0]
+            _id, ts, name = self.excluded_rows[i]
+            # speak_text 需在檔案頂部匯入： from tts import speak_text
+            try:
+                speak_text(name)
+            except NameError:
+                messagebox.showwarning("發音功能未載入", "找不到發音模組 (speak_text)。請確認已加入 tts.py 並在檔案頂端 import。")
+        except Exception as e:
+            messagebox.showerror("發音錯誤", f"嘗試發音時發生錯誤: {e}")
 
     def restore_selected(self):
         sel = self.listbox.curselection()
@@ -1135,10 +1266,31 @@ class BatchWordManagerDialog(tk.Toplevel):
         self.word_edit_area.insert(tk.END, initial_content)
         self.word_edit_area.pack(expand=True, fill='both')
         bf = tk.Frame(self); bf.pack(pady=10)
+
+        # 新增：對選取文字發音（方便試聽單字）
+        tk.Button(bf, text="發音選取字", command=self.speak_selection, font=('Microsoft JhengHei',10), bg="#9C27B0", fg="white", width=12).pack(side=tk.LEFT, padx=6)
+
         tk.Button(bf, text="保存並重新啟動", command=self.save_changes, font=('Microsoft JhengHei',10), bg="#2196F3", fg="white", width=15).pack(side=tk.LEFT, padx=10)
         tk.Button(bf, text="取消", command=self.destroy, font=('Microsoft JhengHei',10), width=15).pack(side=tk.LEFT, padx=10)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.transient(master); self.grab_set()
+
+    def speak_selection(self):
+        """讀取編輯區目前選取文字並發音（通常選一個字或幾個字）。"""
+        try:
+            sel_text = self.word_edit_area.selection_get().strip()
+            if not sel_text:
+                messagebox.showwarning("無選取", "請先在編輯區選取一個字以發音。")
+                return
+            # speak_text 需在檔案頂部匯入： from tts import speak_text
+            try:
+                speak_text(sel_text)
+            except NameError:
+                messagebox.showwarning("發音功能未載入", "找不到發音模組 (speak_text)。請確認已加入 tts.py 並在檔案頂端 import。")
+        except tk.TclError:
+            messagebox.showwarning("無選取", "請先在編輯區選取一個字以發音。")
+        except Exception as e:
+            messagebox.showerror("發音錯誤", f"嘗試發音時發生錯誤: {e}")
 
     def save_changes(self):
         raw = self.word_edit_area.get('1.0', tk.END)
@@ -1156,20 +1308,18 @@ class BatchWordManagerDialog(tk.Toplevel):
             os.execl(python, python, *sys.argv)
         except Exception as e:
             messagebox.showerror("重啟失敗", f"無法自動重啟，請手動重新啟動：\n{e}")
-
-# ----------------- 程式入口 -----------------
+            
 if __name__ == "__main__":
     setup_data_paths()
     load_master_words()
-    # 載入或建立 char attributes
     load_char_attributes()
-    # 初始化 DB 並載入索引緩存
     init_db()
     if not os.path.exists(DB_FILE) or (not db_get_remaining() and POOL_SIZE > 0):
         initialize_database(reset_history=True)
     else:
         load_indices_cache()
     root = tk.Tk()
+    # NOTE: integrate complete NameGeneratorApp implementation (above is truncated with pass for brevity)
     app = NameGeneratorApp(root)
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     root.mainloop()
