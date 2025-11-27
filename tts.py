@@ -1,13 +1,14 @@
-# tts.py - Windows-friendly pyttsx3 TTS manager (queue + single worker)
-# 使用方法：
-# from tts import speak_text, stop_worker
-# 在 NameGeneratorApp.on_closing 呼叫 stop_worker() 再關閉視窗
+# tts.py - pyttsx3 TTS manager（可中斷先前播放，優先播放最新請求）
+# 使用： from tts import speak_text, stop_worker
+# speak_text(text, interrupt=True)  -> 會中斷當前播放並立刻播放 text
+# speak_text(text)                 -> 會排隊播放（不中斷）
+# 請在 NameGeneratorApp.on_closing 中呼叫 stop_worker()
 
 import threading
 import queue
 import time
-import os
 import platform
+import os
 
 try:
     import pyttsx3
@@ -16,25 +17,30 @@ except Exception:
     pyttsx3 = None
     _PYTTSX3_AVAILABLE = False
 
-# 嘗試載入 comtypes 或 pythoncom 以支援 Windows COM 初始化
-_COM_MODULE = None
+# Windows COM helpers (若可用)
+_pythoncom = None
+_comtypes = None
 if platform.system() == "Windows":
     try:
-        import comtypes
-        _COM_MODULE = "comtypes"
+        import pythoncom
+        _pythoncom = pythoncom
     except Exception:
         try:
-            import pythoncom
-            _COM_MODULE = "pythoncom"
+            import comtypes
+            _comtypes = comtypes
         except Exception:
-            _COM_MODULE = None
+            _pythoncom = None
+            _comtypes = None
 
 _TTS_QUEUE = queue.Queue()
-_TTS_WORKER_THREAD = None
-_TTS_STOP_EVENT = threading.Event()
+_TTS_WORKER = None
+_TTS_STOP = threading.Event()
 _TTS_LOCK = threading.Lock()
 
-# debug：設定環境變數 TTS_DEBUG=1 可看到簡單的輸出
+# Engine lock & reference to current engine (for interrupt)
+_ENGINE_LOCK = threading.Lock()
+_CURRENT_ENGINE = None
+
 _DEBUG = bool(os.environ.get("TTS_DEBUG", ""))
 
 def _dprint(*args):
@@ -43,161 +49,194 @@ def _dprint(*args):
 
 def _select_chinese_voice(engine):
     try:
-        voices = engine.getProperty('voices')
+        voices = engine.getProperty("voices")
         for v in voices:
-            vid = getattr(v, 'id', '') or ''
-            name = getattr(v, 'name', '') or ''
-            if any(k in vid.lower() for k in ('zh', 'chinese')) or any(k in name.lower() for k in ('zh', 'chinese', '國語', '普通話', '中文')):
+            vid = getattr(v, "id", "") or ""
+            name = getattr(v, "name", "") or ""
+            if any(k in vid.lower() for k in ("zh", "chinese")) or any(k in name.lower() for k in ("zh", "chinese", "國語", "普通話", "中文")):
                 return v.id
     except Exception:
         pass
     return None
 
-def _init_engine(rate, volume):
-    """嘗試建立並設定 pyttsx3 engine，並在 Windows 執行緒上做 COM 初始化。"""
+def _speak_once_internal(text, rate=160, volume=1.0):
+    """在 worker 執行緒內建立 local engine，並將 engine 設為 _CURRENT_ENGINE，完成後清理。"""
+    global _CURRENT_ENGINE
     if not _PYTTSX3_AVAILABLE:
         _dprint("pyttsx3 not available")
-        return None, None
-
-    coinit_used = None
-    # Windows: 初始化 COM apartment 在本執行緒
-    if platform.system() == "Windows" and _COM_MODULE:
-        try:
-            if _COM_MODULE == "comtypes":
-                import comtypes
-                comtypes.CoInitialize()
-                coinit_used = "comtypes"
-            else:
-                import pythoncom
-                pythoncom.CoInitialize()
-                coinit_used = "pythoncom"
-            _dprint("CoInitialize done via", coinit_used)
-        except Exception as e:
-            _dprint("CoInitialize failed:", e)
-            coinit_used = None
-
-    try:
-        engine = pyttsx3.init()
-        try:
-            engine.setProperty('rate', rate)
-        except Exception:
-            pass
-        try:
-            engine.setProperty('volume', volume)
-        except Exception:
-            pass
-        try:
-            zh = _select_chinese_voice(engine)
-            if zh:
-                engine.setProperty('voice', zh)
-        except Exception:
-            pass
-        return engine, coinit_used
-    except Exception as e:
-        _dprint("engine init failed:", e)
-        # 若 engine init 失敗，嘗試在遇到異常時再 CoUninitialize
-        return None, coinit_used
-
-def _uninit_com_module(coinit_used):
-    """在 Windows 上對應做 CoUninitialize（安全呼叫）。"""
-    if not coinit_used:
         return
-    try:
-        if coinit_used == "comtypes":
-            import comtypes
-            comtypes.CoUninitialize()
-        elif coinit_used == "pythoncom":
-            import pythoncom
-            pythoncom.CoUninitialize()
-        _dprint("CoUninitialize done via", coinit_used)
-    except Exception as e:
-        _dprint("CoUninitialize failed:", e)
 
-def _tts_worker(rate, volume):
-    """worker：序列化處理佇列，遇錯嘗試重建 engine；確保 Windows COM 有被初始化/反初始化。"""
-    engine, coinit_used = _init_engine(rate, volume)
-    _dprint("worker started, engine:", bool(engine), "coinit:", coinit_used)
-    while not _TTS_STOP_EVENT.is_set():
+    coinit_kind = None
+    try:
+        # Windows: 初始化 COM 在目前執行緒
+        if platform.system() == "Windows":
+            try:
+                if _pythoncom is not None:
+                    _pythoncom.CoInitialize()
+                    coinit_kind = "pythoncom"
+                elif _comtypes is not None:
+                    _comtypes.CoInitialize()
+                    coinit_kind = "comtypes"
+                _dprint("CoInitialize:", coinit_kind)
+            except Exception as e:
+                _dprint("CoInitialize failed:", e)
+                coinit_kind = None
+
+        # 建立 engine
         try:
-            txt = _TTS_QUEUE.get(timeout=0.5)
+            engine = pyttsx3.init()
+        except Exception as e:
+            _dprint("pyttsx3.init failed:", e)
+            engine = None
+
+        if engine:
+            try:
+                engine.setProperty("rate", rate)
+            except Exception:
+                pass
+            try:
+                engine.setProperty("volume", volume)
+            except Exception:
+                pass
+            try:
+                zh = _select_chinese_voice(engine)
+                if zh:
+                    engine.setProperty("voice", zh)
+            except Exception:
+                pass
+
+            # set current engine so main thread can call stop() to interrupt
+            with _ENGINE_LOCK:
+                _CURRENT_ENGINE = engine
+
+            try:
+                engine.say(text)
+                engine.runAndWait()
+            except Exception as e:
+                _dprint("engine say/runAndWait error:", e)
+            finally:
+                try:
+                    engine.stop()
+                except Exception:
+                    pass
+
+    finally:
+        # clear current engine
+        with _ENGINE_LOCK:
+            _CURRENT_ENGINE = None
+
+        # Windows: uninit COM
+        if coinit_kind == "pythoncom":
+            try:
+                _pythoncom.CoUninitialize()
+                _dprint("CoUninitialize pythoncom")
+            except Exception as e:
+                _dprint("CoUninitialize failed:", e)
+        elif coinit_kind == "comtypes":
+            try:
+                _comtypes.CoUninitialize()
+                _dprint("CoUninitialize comtypes")
+            except Exception as e:
+                _dprint("CoUninitialize failed:", e)
+
+def _worker_loop(rate=160, volume=1.0):
+    _dprint("TTS worker starting")
+    while not _TTS_STOP.is_set():
+        try:
+            item = _TTS_QUEUE.get(timeout=0.5)
         except queue.Empty:
             continue
 
-        if txt is None:
+        if item is None:
             try:
                 _TTS_QUEUE.task_done()
             except Exception:
                 pass
             break
 
-        success = False
-        for attempt in range(2):
-            if engine is None:
-                # 重新 init 引擎（同時嘗試再初始化 COM）
-                engine, coinit_used = _init_engine(rate, volume)
-                if engine is None:
-                    time.sleep(0.05)
-            if engine:
-                try:
-                    _dprint("saying:", txt)
-                    engine.say(txt)
-                    engine.runAndWait()
-                    success = True
-                    break
-                except Exception as e:
-                    _dprint("engine error during say/run:", e)
-                    try:
-                        engine.stop()
-                    except Exception:
-                        pass
-                    # 丟棄 engine 並讓下一次嘗試重建
-                    engine = None
-                    # 短暫等待
-                    time.sleep(0.05)
-            else:
-                time.sleep(0.05)
-
         try:
-            _TTS_QUEUE.task_done()
-        except Exception:
-            pass
-
-    # worker 結束前確保釋放 COM
-    try:
-        if engine:
+            if isinstance(item, tuple) and len(item) == 3:
+                text, r, v = item
+            else:
+                text, r, v = item, rate, volume
+            _dprint("Worker speaking:", text)
+            _speak_once_internal(text, r, v)
+        except Exception as e:
+            _dprint("Worker exception:", e)
+        finally:
             try:
-                engine.stop()
+                _TTS_QUEUE.task_done()
             except Exception:
                 pass
-    except Exception:
-        pass
-    _uninit_com_module(coinit_used)
-    _dprint("worker exiting")
+
+    _dprint("TTS worker exiting")
 
 def _ensure_worker(rate=160, volume=1.0):
-    global _TTS_WORKER_THREAD
+    global _TTS_WORKER
     with _TTS_LOCK:
-        if _TTS_WORKER_THREAD is None or not _TTS_WORKER_THREAD.is_alive():
-            _TTS_STOP_EVENT.clear()
-            _TTS_WORKER_THREAD = threading.Thread(target=_tts_worker, args=(rate, volume), daemon=True)
-            _TTS_WORKER_THREAD.start()
-            _dprint("worker thread started")
+        if _TTS_WORKER is None or not _TTS_WORKER.is_alive():
+            _TTS_STOP.clear()
+            _TTS_WORKER = threading.Thread(target=_worker_loop, args=(rate, volume), daemon=True)
+            _TTS_WORKER.start()
+            _dprint("TTS worker launched")
 
-def speak_text(text, rate=160, volume=1.0):
+def _clear_queue():
+    """清空佇列中尚未處理的項目（會對每個已入隊的 put 對應呼叫 task_done）。"""
+    try:
+        while True:
+            item = _TTS_QUEUE.get_nowait()
+            try:
+                _TTS_QUEUE.task_done()
+            except Exception:
+                pass
+    except queue.Empty:
+        pass
+
+def _interrupt_current_playback():
+    """嘗試中斷當前播放（呼叫 engine.stop()），此函式 thread-safe。"""
+    with _ENGINE_LOCK:
+        eng = _CURRENT_ENGINE
+    if eng:
+        try:
+            eng.stop()
+        except Exception as e:
+            _dprint("interrupt stop() failed:", e)
+
+def speak_text(text, rate=160, volume=1.0, interrupt=False):
+    """
+    非阻塞：將發音請求放入佇列。
+    如果 interrupt=True：清空隊列並中斷目前播放，保證新請求立刻成為下一個被播放的項目。
+    """
     if not text:
         return
     try:
         _ensure_worker(rate, volume)
-        _TTS_QUEUE.put(str(text))
+        if interrupt:
+            # 優先中斷正在播放的 engine 並清空佇列的舊請求
+            try:
+                _interrupt_current_playback()
+            except Exception:
+                pass
+            try:
+                _clear_queue()
+            except Exception:
+                pass
+        _TTS_QUEUE.put((str(text), rate, volume))
     except Exception as e:
         _dprint("speak_text enqueue failed:", e)
 
 def stop_worker(timeout=1.0):
+    """請在程式結束時呼叫以嘗試優雅停止 worker；也會嘗試中斷當前播放。"""
     try:
-        _TTS_STOP_EVENT.set()
+        _TTS_STOP.set()
+        # 嘗試中斷當前播放
+        try:
+            _interrupt_current_playback()
+        except Exception:
+            pass
         _TTS_QUEUE.put(None)
-        global _TTS_WORKER_THREAD
-        if _TTS_WORKER_THREAD is not None:
-            _TTS_WORKER_THREAD.join(timeout=timeout)
+        global _TTS_WORKER
+        if _TTS_WORKER is not None:
+            _TTS_WORKER.join(timeout=timeout)
     except Exception:
         pass

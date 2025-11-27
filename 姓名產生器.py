@@ -658,19 +658,36 @@ class NameGeneratorApp:
         self.pinyin_var = tk.StringVar(master, value="")
         self.config_stats_var = tk.StringVar(master, value="")
         self.current_name = ""
+        # 確保在建立視窗之後註冊關閉處理
+        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self._setup_ui()
         self._update_progress_display()
 
     def on_closing(self):
-        # 嘗試優雅停止 TTS worker（避免程式直接退出時 worker 卡住）
+        """視窗關閉時，優雅停止 TTS worker 並保存狀態後關閉視窗。"""
         try:
+            # 優先停止/中斷 TTS 背景工作，避免程式直接退出時出現 COM/pyttsx3 問題
             stop_worker()
         except Exception:
             pass
-        save_indices_cache()
-        save_char_attributes()
-        self.master.destroy()
+
+        try:
+            # 如果有保存索引或字屬性等操作，在這裡呼叫
+            save_indices_cache()
+        except Exception:
+            pass
+
+        try:
+            save_char_attributes()
+        except Exception:
+            pass
+
+        # 最後關閉主視窗
+        try:
+            self.master.destroy()
+        except Exception:
+            pass
 
     def _setup_ui(self):
         main_bg = '#F0F0F0'
@@ -844,7 +861,10 @@ class NameGeneratorApp:
             self.pinyin_var.set("")
 
     def draw_name(self):
-        """點擊抽取按鈕時執行的函數（抽到即發音）。"""
+        """
+        抽取名字並立即以 TTS 發音（中斷先前播放，優先播放本次）。
+        請確認 get_unique_name 與其他函數在檔案中已正確定義。
+        """
         MAX_ATTEMPTS = min(POOL_SIZE if POOL_SIZE else 1000, 1000)
         for attempt in range(MAX_ATTEMPTS):
             name, remaining = get_unique_name()
@@ -862,14 +882,14 @@ class NameGeneratorApp:
             except Exception:
                 pass
 
-            # 發音（非阻塞）
+            # 使用可中斷模式：中斷目前發音並立即播放本次名字
             try:
-                speak_text(name)
+                speak_text(name, interrupt=True)
             except Exception:
-                # 容錯：若 TTS 不可用則忽略
+                # 若 TTS 不可用或出錯，容錯忽略
                 pass
 
-            # 若有拼音，顯示拼音
+            # 若有拼音，顯示拼音（可選）
             pinyin_str = ""
             if PINYIN_ENABLED:
                 try:
@@ -881,7 +901,7 @@ class NameGeneratorApp:
             self._update_progress_display(name, remaining, pinyin_str)
             return
 
-        # 嘗試耗盡仍未找到
+        # 若連續嘗試都失敗
         self.current_name = ""
         self.pinyin_var.set("")
         remaining = self._get_remaining_count()
