@@ -693,51 +693,123 @@ class NameGeneratorApp:
     def _setup_ui(self):
         main_bg = '#F0F0F0'
         name_fg = 'black'
-        self.name_display = tk.Entry(self.master, textvariable=self.name_var, font=('Microsoft JhengHei', 24, 'bold'), fg=name_fg, bg=main_bg, justify='center', state='readonly', readonlybackground=main_bg, relief='flat', width=15)
-        self.name_display.pack(pady=10, padx=10)
-        self.pinyin_display = tk.Label(self.master, textvariable=self.pinyin_var, font=('Microsoft JhengHei', 12, 'italic'), fg='gray', bg=main_bg, pady=0)
-        self.pinyin_display.pack(pady=(0,5))
-        # 發音按鈕放在名字下方（與拼音同列）
-        tts_frame = tk.Frame(self.master, bg=main_bg)
-        tts_frame.pack()
-        self.speak_button = tk.Button(tts_frame, text="發音 (t)", command=self.speak_current_name, font=('Microsoft JhengHei', 10), bg="#9C27B0", fg='white', width=12)
-        self.speak_button.pack(pady=(0,6))
-        self.progress_label = tk.Label(self.master, textvariable=self.progress_var, font=('Microsoft JhengHei', 10), bg=main_bg, pady=10)
-        self.progress_label.pack()
-        self.draw_button = tk.Button(self.master, text="抽取下一個名字 (Click)", command=self.draw_name, font=('Microsoft JhengHei', 14), bg="#4CAF50", fg='white', width=30, height=2)
-        self.draw_button.pack(pady=10)
 
-        batch_frame = tk.Frame(self.master, bg=main_bg); batch_frame.pack(pady=5)
+        # 名字顯示區
+        self.name_display = tk.Entry(self.master,
+                                    textvariable=self.name_var,
+                                    font=('Microsoft JhengHei', 24, 'bold'),
+                                    fg=name_fg,
+                                    bg=main_bg,
+                                    justify='center',
+                                    state='readonly',
+                                    readonlybackground=main_bg,
+                                    relief='flat',
+                                    width=15)
+        self.name_display.pack(pady=10, padx=10)
+
+        # 拼音與發音按鈕
+        pinyin_frame = tk.Frame(self.master, bg=main_bg)
+        pinyin_frame.pack(pady=(0, 6))
+        self.pinyin_display = tk.Label(pinyin_frame,
+                                    textvariable=self.pinyin_var,
+                                    font=('Microsoft JhengHei', 12, 'italic'),
+                                    fg='gray',
+                                    bg=main_bg,
+                                    pady=0)
+        self.pinyin_display.pack(side=tk.LEFT, padx=(0, 10))
+        self.speak_button = tk.Button(pinyin_frame,
+                                    text="發音 (t)",
+                                    command=self.speak_current_name,
+                                    font=('Microsoft JhengHei', 10),
+                                    bg="#9C27B0", fg='white', width=12)
+        self.speak_button.pack(side=tk.LEFT)
+
+        # 進度與主要抽取按鈕
+        self.progress_label = tk.Label(self.master,
+                                    textvariable=self.progress_var,
+                                    font=('Microsoft JhengHei', 10),
+                                    bg=main_bg,
+                                    pady=6)
+        self.progress_label.pack()
+
+        self.draw_button = tk.Button(self.master,
+                                    text="抽取下一個名字 (Click)",
+                                    command=self.draw_name,
+                                    font=('Microsoft JhengHei', 14),
+                                    bg="#4CAF50",
+                                    fg='white',
+                                    width=30,
+                                    height=2)
+        self.draw_button.pack(pady=8)
+
+        # 批量抽取區（保留原本欄位）
+        batch_frame = tk.Frame(self.master, bg=main_bg)
+        batch_frame.pack(pady=6)
         tk.Label(batch_frame, text="批量數量:", bg=main_bg, font=('Microsoft JhengHei', 10)).pack(side=tk.LEFT, padx=(10,2))
         self.batch_count_var = tk.StringVar(self.master, value='50')
-        self.batch_count_entry = tk.Entry(batch_frame, textvariable=self.batch_count_var, width=6, font=('Microsoft JhengHei', 10)); self.batch_count_entry.pack(side=tk.LEFT, padx=(0,10))
-        self.batch_draw_button = tk.Button(batch_frame, text="批量抽取並預覽", command=self.batch_draw_gui, font=('Microsoft JhengHei', 10), bg="#03A9F4", fg='white', width=18); self.batch_draw_button.pack(side=tk.LEFT, padx=5)
+        self.batch_count_entry = tk.Entry(batch_frame, textvariable=self.batch_count_var, width=6, font=('Microsoft JhengHei', 10))
+        self.batch_count_entry.pack(side=tk.LEFT, padx=(0,10))
+        self.batch_draw_button = tk.Button(batch_frame, text="批量抽取並預覽", command=self.batch_draw_gui,
+                                        font=('Microsoft JhengHei', 10), bg="#03A9F4", fg='white', width=18)
+        self.batch_draw_button.pack(side=tk.LEFT, padx=6)
 
-        button_frame_top = tk.Frame(self.master, bg=main_bg); button_frame_top.pack(pady=5)
-        self.history_button = tk.Button(button_frame_top, text="檢視歷史 (l)", command=self.view_history_gui, font=('Microsoft JhengHei', 10), width=12); self.history_button.pack(side=tk.LEFT, padx=5)
-        self.view_favorite_button = tk.Button(button_frame_top, text="檢視收藏 (v)", command=self.view_favorites_gui, font=('Microsoft JhengHei', 10), width=12); self.view_favorite_button.pack(side=tk.LEFT, padx=5)
-        self.export_button = tk.Button(button_frame_top, text="匯出歷史 (e)", command=self.export_history_gui, font=('Microsoft JhengHei', 10), width=12); self.export_button.pack(side=tk.LEFT, padx=5)
-        self.info_button = tk.Button(button_frame_top, text="系統資訊 (i)", command=self.display_info_gui, font=('Microsoft JhengHei', 10), width=12); self.info_button.pack(side=tk.LEFT, padx=5)
+        # 大按鈕區：4 行，每行最多 4 個按鈕（共 16 個按鈕）
+        # 按鈕列表順序會決定在畫面上的排列（從上到下、從左到右）
+        btn_defs = [
+            # row1
+            ("檢視歷史 (l)", self.view_history_gui, "#ECEFF1"),
+            ("檢視收藏 (v)", self.view_favorites_gui, "#E8F5E9"),
+            ("匯出歷史 (e)", self.export_history_gui, "#FFF3E0"),
+            ("系統資訊 (i)", self.display_info_gui, "#F3E5F5"),
+            # row2
+            ("重置數據庫 (r)", self.reset_database, "#FFCDD2"),
+            ("檢視排除列表", self.view_excluded_names_gui, "#FFEBEE"),
+            ("恢復排除組合", self.view_and_restore_excluded_gui, "#F0F4C3"),
+            ("字詞庫管理 (m)", self.manage_words_gui, "#FFE0B2"),
+            # row3
+            ("過濾設定 (g)", self.open_filter_settings, "#B2DFDB"),
+            ("預覽候選 (p)", self.open_preview_dialog, "#FFCC80"),
+            ("查詢名字 (s)", self.search_name_gui, "#E1F5FE"),
+            ("字詞頻率 (w)", self.display_frequency_stats_gui, "#B3E5FC"),
+            # row4
+            ("排除此組合 (x)", self.exclude_current_name_gui, "#FFCDD2"),
+            ("收藏名字 (f)", self.add_favorite_gui, "#FFF9C4"),
+            ("撤銷抽取 (u)", self.undo_last_draw_gui, "#D1C4E9"),
+            ("檢視字詞庫 (w)", self.view_word_list_gui, "#C8E6C9"),
+        ]
 
-        button_frame_middle = tk.Frame(self.master, bg=main_bg); button_frame_middle.pack(pady=5)
-        self.reset_button = tk.Button(button_frame_middle, text="重置數據庫 (r)", command=self.reset_database, font=('Microsoft JhengHei', 10), width=12, bg="#D32F2F", fg="white"); self.reset_button.pack(side=tk.LEFT, padx=5)
-        self.excluded_button = tk.Button(button_frame_middle, text="檢視排除列表", command=self.view_excluded_names_gui, font=('Microsoft JhengHei', 10), width=12); self.excluded_button.pack(side=tk.LEFT, padx=5)
-        self.restore_button = tk.Button(button_frame_top, text="恢復排除組合", command=self.view_and_restore_excluded_gui, font=('Microsoft JhengHei', 10), width=12, bg="#CDDC39"); self.restore_button.pack(side=tk.LEFT, padx=5)
-        self.manage_button = tk.Button(button_frame_middle, text="字詞庫管理 (m)", command=self.manage_words_gui, font=('Arial', 10), width=12, bg="#FFE0B2"); self.manage_button.pack(side=tk.LEFT, padx=5)
-        self.filter_button = tk.Button(button_frame_middle, text="過濾設定 (g)", command=self.open_filter_settings, font=('Microsoft JhengHei', 10), width=12, bg="#B2DFDB"); self.filter_button.pack(side=tk.LEFT, padx=5)
-        self.preview_button = tk.Button(button_frame_middle, text="預覽候選 (p)", command=self.open_preview_dialog, font=('Microsoft JhengHei', 10), width=12, bg="#FFCC80"); self.preview_button.pack(side=tk.LEFT, padx=5)
-        self.search_button = tk.Button(button_frame_middle, text="查詢名字 (s)", command=self.search_name_gui, font=('Microsoft JhengHei', 10), width=12); self.search_button.pack(side=tk.LEFT, padx=5)
-        self.frequency_button = tk.Button(button_frame_middle, text="字詞頻率 (w)", command=self.display_frequency_stats_gui, font=('Microsoft JhengHei', 10), width=12, bg="#B3E5FC"); self.frequency_button.pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame_middle, text="TTS 設定", command=lambda: TTSSettingsDialog(self.master, on_save=lambda cfg: None), font=('Microsoft JhengHei', 10), width=12).pack(side=tk.LEFT, padx=5)
-        tk.Button(button_frame_middle, text="字屬性編輯", command=lambda: CharAttributesEditor(self.master, CHAR_ATTR_FILE, on_save=lambda attrs: load_char_attributes()), font=('Microsoft JhengHei', 10), width=12).pack(side=tk.LEFT, padx=5)
+        # container frame for the grid of buttons
+        buttons_container = tk.Frame(self.master, bg=main_bg)
+        buttons_container.pack(padx=10, pady=8, fill='x')
 
-        button_frame_last = tk.Frame(self.master, bg=main_bg); button_frame_last.pack(pady=5)
-        self.exclude_button = tk.Button(button_frame_last, text="排除此組合 (x)", command=self.exclude_current_name_gui, font=('Microsoft JhengHei', 10), width=12, bg="#FFCDD2"); self.exclude_button.pack(side=tk.LEFT, padx=10)
-        self.favorite_button = tk.Button(button_frame_last, text="收藏名字 (f)", command=self.add_favorite_gui, font=('Microsoft JhengHei', 10), width=12); self.favorite_button.pack(side=tk.LEFT, padx=10)
-        self.undo_button = tk.Button(button_frame_last, text="撤銷抽取 (u)", command=self.undo_last_draw_gui, font=('Microsoft JhengHei', 10), width=12, bg="#D1C4E9"); self.undo_button.pack(side=tk.LEFT, padx=10)
+        # we will create 4 rows and 4 columns grid
+        rows = 4
+        cols = 4
+        # create frames for each row to control spacing if needed
+        for r in range(rows):
+            row_frame = tk.Frame(buttons_container, bg=main_bg)
+            row_frame.pack(fill='x', pady=4)
+            for c in range(cols):
+                idx = r * cols + c
+                if idx < len(btn_defs):
+                    text, cmd, color = btn_defs[idx]
+                    b = tk.Button(row_frame, text=text, command=cmd, font=('Microsoft JhengHei', 10),
+                                bg=color, width=18, height=1)
+                    # pack left to create columns
+                    b.pack(side=tk.LEFT, padx=6, expand=True)
+                else:
+                    # filler
+                    filler = tk.Label(row_frame, text="", bg=main_bg, width=18)
+                    filler.pack(side=tk.LEFT, padx=6, expand=True)
 
-        button_frame_last2 = tk.Frame(self.master, bg=main_bg); button_frame_last2.pack(pady=5)
-        self.view_words_button = tk.Button(button_frame_last2, text="檢視字詞庫 (w)", command=self.view_word_list_gui, font=('Microsoft JhengHei', 10), width=15, bg="#C8E6C9"); self.view_words_button.pack(side=tk.LEFT, padx=5)
+        # 若需更多控制（例如響應式寬度），可改用 grid 並設定 column weights
+        # 例如：使用 row_frame.grid_columnconfigure(i, weight=1) 使按鈕寬度隨窗口調整
+
+        # 可選：在視窗底部放一個狀態列或說明文字
+        status_frame = tk.Frame(self.master, bg=main_bg)
+        status_frame.pack(fill='x', padx=10, pady=(6, 10))
+        self.status_label = tk.Label(status_frame, text="歡迎使用名字抽取器", font=('Microsoft JhengHei', 9), bg=main_bg, fg='gray')
+        self.status_label.pack(side=tk.LEFT)
 
     def speak_current_name(self):
         # speak current_name if present, else speak what's in the display
