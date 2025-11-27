@@ -647,7 +647,7 @@ class NameGeneratorApp:
         self.master = master
         master.title(f"名字抽取器 | 總組合數: {POOL_SIZE:,}")
         # 設為預設較大的視窗（若需改回其他尺寸請修改此行）
-        master.geometry("900x500")
+        master.geometry("900x450")
         master.config(bg='#F0F0F0')
 
         self.name_var = tk.StringVar(master, value="準備就緒，請點擊抽取")
@@ -700,46 +700,64 @@ class NameGeneratorApp:
         main_bg = '#F0F0F0'
         name_fg = 'black'
 
-        # 名字顯示
-        self.name_display = tk.Entry(self.master,
-                                     textvariable=self.name_var,
-                                     font=('Microsoft JhengHei', 24, 'bold'),
-                                     fg=name_fg, bg=main_bg, justify='center',
-                                     state='readonly', readonlybackground=main_bg,
-                                     relief='flat', width=20)
-        self.name_display.pack(pady=(12,6), padx=12)
+        # --- 1. 清除可能殘留的舊 widget，避免重複或混用 pack/grid 導致布局異常 ---
+        for attr in ['name_display', 'pinyin_display', 'progress_label', 'draw_button',
+                    'batch_frame', 'buttons_container', 'status_label', 'speak_button']:
+            try:
+                w = getattr(self, attr, None)
+                if w is not None:
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        delattr(self, attr)
+                    except Exception:
+                        # delattr 可能在 class 沒有屬性時失敗，忽略
+                        pass
+            except Exception:
+                pass
 
-        # 拼音與發音按鈕在同一列
-        # A) 推薦：grid 三欄法（左右權重相同，中央 label 固定在中間）
-        # ---------------------------
-        pinyin_frame = tk.Frame(self.master, bg=main_bg)
-        pinyin_frame.pack(pady=(0, 6), padx=12, fill='x')
+        # --- 2. 建立新的緊貼 name/pinyin 布局（Label + grid） ---
+        # container for name + pinyin + speak button
+        np_frame = tk.Frame(self.master, bg=main_bg)
+        np_frame.pack(fill='x', padx=12, pady=(8,4))
 
-        # 設定 3 欄：左右欄 weight=1，中央欄 weight=0（中央固定，左右作為彈性填充）
-        pinyin_frame.grid_columnconfigure(0, weight=1)
-        pinyin_frame.grid_columnconfigure(1, weight=0)
-        pinyin_frame.grid_columnconfigure(2, weight=1)
+        # grid config: col0 = center (stretch), col1 = speak button (fixed)
+        np_frame.grid_columnconfigure(0, weight=1)
+        np_frame.grid_columnconfigure(1, weight=0)
 
-        self.pinyin_display = tk.Label(pinyin_frame,
+        # Use Label for the big name to have tighter control over height
+        self.name_var.set(self.name_var.get())  # 確保有值
+        self.name_display = tk.Label(np_frame,
+                                    textvariable=self.name_var,
+                                    font=('Microsoft JhengHei', 28, 'bold'),
+                                    fg=name_fg, bg=main_bg,
+                                    pady=0)
+        # 放中央欄（col=0），minimal pady
+        self.name_display.grid(row=0, column=0, sticky='n', pady=(0,2))
+
+        # pinyin 下方緊貼
+        self.pinyin_display = tk.Label(np_frame,
                                     textvariable=self.pinyin_var,
                                     font=('Microsoft JhengHei', 12, 'italic'),
                                     fg='gray', bg=main_bg)
-        # 中央欄（col=1），不使用 expand/fill，會保持在 frame 正中央
-        self.pinyin_display.grid(row=0, column=1, padx=6)
+        self.pinyin_display.grid(row=1, column=0, sticky='n', pady=(0,2))
 
-        # 把發音按鈕放在最右欄（col=2），靠右顯示
-        self.speak_button = tk.Button(pinyin_frame, text="發音 (t)", command=self.speak_current_name,
+        # speak button 右側，跨兩列以對齊 name + pinyin
+        self.speak_button = tk.Button(np_frame, text="發音 (t)", command=self.speak_current_name,
                                     font=('Microsoft JhengHei', 10), bg="#9C27B0", fg='white', width=12)
-        self.speak_button.grid(row=0, column=2, sticky='e', padx=(8,0))
+        self.speak_button.grid(row=0, column=1, rowspan=2, sticky='ne', padx=(8,0), pady=(0,2))
 
-        # 進度與主要抽取按鈕
+        # --- 3. progress 與 draw button（較小的間距） ---
         self.progress_label = tk.Label(self.master, textvariable=self.progress_var,
-                                       font=('Microsoft JhengHei', 10), bg=main_bg)
-        self.progress_label.pack(pady=(6,4))
+                                    font=('Microsoft JhengHei', 10), bg=main_bg)
+        self.progress_label.pack(pady=(0,6))
+
         self.draw_button = tk.Button(self.master, text="抽取下一個名字 (Click)", command=self.draw_name,
-                                     font=('Microsoft JhengHei', 14), bg="#4CAF50", fg='white',
-                                     width=36, height=2)
-        self.draw_button.pack(pady=(0,10))
+                                    font=('Microsoft JhengHei', 14), bg="#4CAF50", fg='white',
+                                    width=36, height=2)
+        self.draw_button.pack(pady=(0,8))
 
         # 批量抽取區
         batch_frame = tk.Frame(self.master, bg=main_bg)
@@ -801,6 +819,7 @@ class NameGeneratorApp:
         status_frame.pack(fill='x', padx=12, pady=(6,10))
         self.status_label = tk.Label(status_frame, text="歡迎使用名字抽取器", font=('Microsoft JhengHei', 9), bg=main_bg, fg='gray')
         self.status_label.pack(side=tk.LEFT)
+        
 
     # ----------------- TTS / UI 操作相關方法 -----------------
     def speak_current_name(self):
