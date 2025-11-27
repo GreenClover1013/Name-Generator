@@ -16,6 +16,7 @@ import subprocess
 import platform
 from tts import speak_text, stop_worker
 from additions import TTSSettingsDialog, CharAttributesEditor, register_shortcuts, load_tts_config, save_tts_config
+from zhuyin_ui import ZhuyinSettingsDialog, load_zhuyin_config, get_zhuyin
 
 # --- pypinyin 可選 ---
 try:
